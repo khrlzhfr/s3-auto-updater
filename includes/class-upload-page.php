@@ -128,8 +128,12 @@ class S3_Auto_Updater_Upload_Page {
         }
 
         $type     = isset( $_POST['s3u_type'] ) && $_POST['s3u_type'] === 'themes' ? 'themes' : 'plugins';
-        $filename = sanitize_file_name( $_FILES['s3u_file']['name'] );
         $tmppath  = $_FILES['s3u_file']['tmp_name'];
+
+        // Sanitise filename manually to preserve the '---' delimiter.
+        // WordPress's sanitize_file_name() collapses consecutive hyphens.
+        $filename = basename( $_FILES['s3u_file']['name'] );
+        $filename = preg_replace( '/[^a-zA-Z0-9._\-]/', '', $filename );
 
         // Validate .zip extension.
         if ( strtolower( substr( $filename, -4 ) ) !== '.zip' ) {
