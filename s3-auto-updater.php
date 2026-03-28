@@ -57,7 +57,11 @@ if ( $s3_updater_settings->is_configured() ) {
         $s3_updater_settings->get( 'secret' )
     );
 
-    $s3_updater = new S3_Auto_Updater_Updater( $s3_updater_client );
+    $s3_updater = new S3_Auto_Updater_Updater(
+        $s3_updater_client,
+        $s3_updater_settings->get( 'bucket' ),
+        $s3_updater_settings->get( 'region' )
+    );
     $s3_updater->init();
 
     $s3_upload_page = new S3_Auto_Updater_Upload_Page( $s3_updater_client );

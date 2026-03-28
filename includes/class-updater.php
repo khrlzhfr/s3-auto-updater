@@ -20,6 +20,12 @@ class S3_Auto_Updater_Updater {
     /** @var S3_Auto_Updater_Client */
     private $client;
 
+    /** @var string S3 bucket name. */
+    private $bucket;
+
+    /** @var string AWS region. */
+    private $region;
+
     /** @var string Delimiter between slug and version in filenames. */
     private $delimiter = '---';
 
@@ -31,9 +37,13 @@ class S3_Auto_Updater_Updater {
 
     /**
      * @param S3_Auto_Updater_Client $client
+     * @param string                 $bucket
+     * @param string                 $region
      */
-    public function __construct( S3_Auto_Updater_Client $client ) {
+    public function __construct( S3_Auto_Updater_Client $client, $bucket, $region ) {
         $this->client = $client;
+        $this->bucket = $bucket;
+        $this->region = $region;
     }
 
     /**
@@ -637,8 +647,8 @@ class S3_Auto_Updater_Updater {
     private function build_s3_url( $key ) {
         return sprintf(
             'https://%s.s3.%s.amazonaws.com/%s',
-            S3_UPDATER_BUCKET,
-            S3_UPDATER_REGION,
+            $this->bucket,
+            $this->region,
             rawurlencode( $key )
         );
     }
@@ -652,8 +662,8 @@ class S3_Auto_Updater_Updater {
     private function is_our_url( $url ) {
         $base = sprintf(
             'https://%s.s3.%s.amazonaws.com/',
-            S3_UPDATER_BUCKET,
-            S3_UPDATER_REGION
+            $this->bucket,
+            $this->region
         );
 
         return 0 === strpos( $url, $base );
@@ -668,8 +678,8 @@ class S3_Auto_Updater_Updater {
     private function url_to_key( $url ) {
         $base = sprintf(
             'https://%s.s3.%s.amazonaws.com/',
-            S3_UPDATER_BUCKET,
-            S3_UPDATER_REGION
+            $this->bucket,
+            $this->region
         );
 
         if ( 0 !== strpos( $url, $base ) ) {
