@@ -2,9 +2,8 @@
 /**
  * Lightweight S3 client using AWS Signature V4.
  *
- * Only implements ListObjectsV2 and GetObject – the two operations
- * needed by the updater. Uses wp_remote_get() so there are no
- * external dependencies.
+ * Implements ListObjectsV2, GetObject, PutObject, and DeleteObject.
+ * Uses wp_remote_request() so there are no external dependencies.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -54,7 +53,7 @@ class S3_Auto_Updater_Client {
             'prefix'    => $prefix,
         );
 
-        $response = $this->request( '/', $query_params );
+        $response = $this->request( 'GET', '/', $query_params );
 
         if ( is_wp_error( $response ) ) {
             return $response;
@@ -95,7 +94,7 @@ class S3_Auto_Updater_Client {
         $path    = '/' . ltrim( $key, '/' );
         $tmpfile = wp_tempnam( basename( $key ) );
 
-        $response = $this->request( $path, array(), array(
+        $response = $this->request( 'GET', $path, array(), '', array(
             'timeout'  => 300,
             'stream'   => true,
             'filename' => $tmpfile,
@@ -118,45 +117,125 @@ class S3_Auto_Updater_Client {
         return $tmpfile;
     }
 
+    /**
+     * Upload a file to S3.
+     *
+     * @param  string          $key       S3 object key, e.g. 'plugins/my-plugin---1.0.0.zip'.
+     * @param  string          $filepath  Path to the local file to upload.
+     * @return true|WP_Error
+     */
+    public function upload( $key, $filepath ) {
+        if ( ! file_exists( $filepath ) || ! is_readable( $filepath ) ) {
+            return new WP_Error(
+                's3_upload_error',
+                sprintf( 'File "%s" does not exist or is not readable.', $filepath )
+            );
+        }
+
+        $body         = file_get_contents( $filepath );
+        $path         = '/' . ltrim( $key, '/' );
+        $content_type = 'application/zip';
+
+        $response = $this->request( 'PUT', $path, array(), $body, array(
+            'timeout' => 300,
+            'headers' => array(
+                'Content-Type' => $content_type,
+            ),
+        ) );
+
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        if ( $code !== 200 ) {
+            return new WP_Error(
+                's3_upload_error',
+                sprintf( 'S3 PutObject returned HTTP %d for key "%s".', $code, $key )
+            );
+        }
+
+        return true;
+    }
+
+    /**
+     * Delete an object from S3.
+     *
+     * @param  string          $key  S3 object key.
+     * @return true|WP_Error
+     */
+    public function delete( $key ) {
+        $path     = '/' . ltrim( $key, '/' );
+        $response = $this->request( 'DELETE', $path );
+
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        // S3 returns 204 on successful delete.
+        if ( $code !== 204 && $code !== 200 ) {
+            return new WP_Error(
+                's3_delete_error',
+                sprintf( 'S3 DeleteObject returned HTTP %d for key "%s".', $code, $key )
+            );
+        }
+
+        return true;
+    }
+
     /* ------------------------------------------------------------------
      * Internal helpers
      * ----------------------------------------------------------------*/
 
     /**
-     * Make a signed GET request to S3.
+     * Make a signed request to S3.
      *
+     * @param  string $method       HTTP method: GET, PUT, DELETE.
      * @param  string $path         URI path, e.g. '/' or '/plugins/file.zip'.
      * @param  array  $query_params Query string parameters.
-     * @param  array  $extra_args   Additional args passed to wp_remote_get().
+     * @param  string $body         Request body (empty for GET/DELETE).
+     * @param  array  $extra_args   Additional args passed to wp_remote_request().
      * @return array|WP_Error       WP HTTP response.
      */
-    private function request( $path, $query_params = array(), $extra_args = array() ) {
+    private function request( $method = 'GET', $path = '/', $query_params = array(), $body = '', $extra_args = array() ) {
         $timestamp = time();
         $date      = gmdate( 'Ymd\THis\Z', $timestamp );
         $datestamp  = gmdate( 'Ymd', $timestamp );
 
-        // URI-encode each path segment (preserves '/').
         $encoded_path = $this->encode_uri( $path );
 
-        // Sort query params alphabetically by key (required by SigV4).
         ksort( $query_params );
         $canonical_query = $this->build_query_string( $query_params );
 
-        // Payload hash (always empty body for GET).
-        $payload_hash = hash( 'sha256', '' );
+        $payload_hash = hash( 'sha256', $body );
 
-        // Canonical headers – must be sorted by lowercase header name.
-        $canonical_headers = implode( "\n", array(
+        // Collect headers – content-type only for PUT.
+        $header_lines = array(
             'host:' . $this->host,
-            'x-amz-content-sha256:' . $payload_hash,
-            'x-amz-date:' . $date,
-        ) ) . "\n";
+        );
+        $signed_header_names = array( 'host' );
 
-        $signed_headers = 'host;x-amz-content-sha256;x-amz-date';
+        if ( isset( $extra_args['headers']['Content-Type'] ) ) {
+            $header_lines[]        = 'content-type:' . $extra_args['headers']['Content-Type'];
+            $signed_header_names[] = 'content-type';
+        }
 
-        // Canonical request.
+        $header_lines[]        = 'x-amz-content-sha256:' . $payload_hash;
+        $signed_header_names[] = 'x-amz-content-sha256';
+
+        $header_lines[]        = 'x-amz-date:' . $date;
+        $signed_header_names[] = 'x-amz-date';
+
+        // Sort both arrays alphabetically.
+        sort( $header_lines );
+        sort( $signed_header_names );
+
+        $canonical_headers = implode( "\n", $header_lines ) . "\n";
+        $signed_headers    = implode( ';', $signed_header_names );
+
         $canonical_request = implode( "\n", array(
-            'GET',
+            $method,
             $encoded_path,
             $canonical_query,
             $canonical_headers,
@@ -164,7 +243,6 @@ class S3_Auto_Updater_Client {
             $payload_hash,
         ) );
 
-        // String to sign.
         $scope          = "{$datestamp}/{$this->region}/s3/aws4_request";
         $string_to_sign = implode( "\n", array(
             'AWS4-HMAC-SHA256',
@@ -173,13 +251,9 @@ class S3_Auto_Updater_Client {
             hash( 'sha256', $canonical_request ),
         ) );
 
-        // Signing key.
         $signing_key = $this->derive_signing_key( $datestamp );
+        $signature   = hash_hmac( 'sha256', $string_to_sign, $signing_key );
 
-        // Signature.
-        $signature = hash_hmac( 'sha256', $string_to_sign, $signing_key );
-
-        // Authorisation header.
         $authorization = sprintf(
             'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s',
             $this->access_key,
@@ -188,26 +262,36 @@ class S3_Auto_Updater_Client {
             $signature
         );
 
-        // Build URL.
         $url = 'https://' . $this->host . $path;
         if ( $canonical_query !== '' ) {
             $url .= '?' . $canonical_query;
         }
 
+        $request_headers = array(
+            'Host'                 => $this->host,
+            'x-amz-date'           => $date,
+            'x-amz-content-sha256' => $payload_hash,
+            'Authorization'        => $authorization,
+        );
+
+        if ( isset( $extra_args['headers']['Content-Type'] ) ) {
+            $request_headers['Content-Type'] = $extra_args['headers']['Content-Type'];
+        }
+
+        // Remove our processed headers from extra_args to avoid conflicts.
+        unset( $extra_args['headers'] );
+
         $args = array_merge(
             array(
-                'headers' => array(
-                    'Host'                 => $this->host,
-                    'x-amz-date'           => $date,
-                    'x-amz-content-sha256' => $payload_hash,
-                    'Authorization'        => $authorization,
-                ),
+                'method'  => $method,
+                'headers' => $request_headers,
+                'body'    => ( '' !== $body ) ? $body : null,
                 'timeout' => 30,
             ),
             $extra_args
         );
 
-        return wp_remote_get( $url, $args );
+        return wp_remote_request( $url, $args );
     }
 
     /**

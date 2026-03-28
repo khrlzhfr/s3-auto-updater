@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name: S3 Auto Updater
- * Plugin URI:  https://github.com/khrlzhfr/s3-auto-updater
+* Plugin URI:  https://github.com/khrlzhfr/s3-auto-updater
  * Description: Automatically updates custom plugins and themes from an Amazon S3 bucket.
- * Version:     1.0.1
+ * Version:     1.0.2
  * Author:      Khairil Zhafri
  * Requires PHP: 7.4
  * Requires at least: 5.5
@@ -35,6 +35,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 require_once __DIR__ . '/includes/class-settings.php';
 require_once __DIR__ . '/includes/class-s3-client.php';
 require_once __DIR__ . '/includes/class-updater.php';
+require_once __DIR__ . '/includes/class-upload-page.php';
 
 /**
  * Always initialise the settings page so credentials can be entered
@@ -58,6 +59,9 @@ if ( $s3_updater_settings->is_configured() ) {
 
     $s3_updater = new S3_Auto_Updater_Updater( $s3_updater_client );
     $s3_updater->init();
+
+    $s3_upload_page = new S3_Auto_Updater_Upload_Page( $s3_updater_client );
+    $s3_upload_page->init();
 
 } else {
 

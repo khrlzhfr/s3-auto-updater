@@ -29,15 +29,15 @@ convention below and your WordPress sites will pick up the update.
        "Statement": [
            {
                "Effect": "Allow",
-               "Action": [
-                   "s3:ListBucket"
-               ],
+               "Action": "s3:ListBucket",
                "Resource": "arn:aws:s3:::your-bucket-name"
            },
            {
                "Effect": "Allow",
                "Action": [
-                   "s3:GetObject"
+                   "s3:GetObject",
+                   "s3:PutObject",
+                   "s3:DeleteObject"
                ],
                "Resource": "arn:aws:s3:::your-bucket-name/*"
            }
@@ -100,6 +100,19 @@ screens just like any other update. Auto-updates work normally if enabled.
 To force a check, go to Dashboard > Updates and click "Check again".
 This also clears the S3 Auto Updater cache.
 
+You can also click the "Update all now" link on the S3 Auto Updater
+row in the Plugins page to force-update everything in one go.
+
+
+== Uploading Packages ==
+
+Go to Tools > S3 Updater to upload zip files directly to your S3
+bucket from the WordPress admin. The page also lists all packages
+currently in the bucket, with the option to delete old versions.
+
+Alternatively, you can upload files to the bucket directly via the
+AWS Console, AWS CLI, or any S3-compatible tool.
+
 
 == Troubleshooting ==
 
@@ -107,12 +120,18 @@ This also clears the S3 Auto Updater cache.
   prefixed with "S3 Auto Updater:".
 - Confirm that the zip filename slug matches the installed directory name
   exactly (case-sensitive).
-- Confirm that the IAM user has both s3:ListBucket and s3:GetObject
-  permissions on the correct bucket.
+- Confirm that the IAM user has s3:ListBucket, s3:GetObject, s3:PutObject,
+  and s3:DeleteObject permissions on the correct bucket.
 - Confirm that the S3_UPDATER_REGION matches your bucket's actual region.
 
 
 == Changelog ==
+
+= 1.2.0 =
+* Added upload page under Tools > S3 Updater for uploading and deleting
+  packages directly from the WordPress admin.
+* S3 client now supports PutObject and DeleteObject operations.
+* IAM policy updated to include s3:PutObject and s3:DeleteObject.
 
 = 1.1.0 =
 * Added settings page under Settings > General for entering S3 credentials.
