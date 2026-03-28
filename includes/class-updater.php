@@ -123,6 +123,11 @@ class S3_Auto_Updater_Updater {
                     'icons'       => array(),
                     'banners'     => array(),
                 );
+            } else {
+                // Already up to date – remove any update entries injected by
+                // third-party updaters (e.g. Crocoblock, Envato) to prevent
+                // false "update available" notices.
+                unset( $transient->response[ $plugin_file ] );
             }
         }
 
@@ -166,6 +171,9 @@ class S3_Auto_Updater_Updater {
                     'package'     => $this->build_s3_url( $s3_items[ $slug ]['key'] ),
                     'url'         => '',
                 );
+            } else {
+                // Already up to date – suppress third-party update notices.
+                unset( $transient->response[ $slug ] );
             }
         }
 

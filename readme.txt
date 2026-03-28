@@ -44,12 +44,21 @@ convention below and your WordPress sites will pick up the update.
        ]
    }
 
-3. Add the following constants to wp-config.php:
+3. Add your credentials via one of two methods:
+
+   Option A – wp-config.php (recommended for security):
 
    define('S3_UPDATER_BUCKET', 'your-bucket-name');
    define('S3_UPDATER_REGION', 'ap-southeast-1');
    define('S3_UPDATER_KEY',    'AKIA...');
    define('S3_UPDATER_SECRET', 'your-secret-key');
+
+   Option B – Settings > General in the WordPress admin:
+
+   Scroll down to the "S3 Auto Updater" section and fill in the fields.
+
+   Constants in wp-config.php always take priority. When a constant is
+   defined, the corresponding field in Settings is shown as disabled.
 
 4. Install and activate the S3 Auto Updater plugin.
 
@@ -104,6 +113,14 @@ This also clears the S3 Auto Updater cache.
 
 
 == Changelog ==
+
+= 1.1.0 =
+* Added settings page under Settings > General for entering S3 credentials.
+* wp-config.php constants take priority; fields are disabled when defined.
+* Added "Update all now" action link on the plugin row.
+* Suppressed false update notices from third-party updaters (e.g. Crocoblock)
+  for plugins/themes managed by this updater.
+* Improved error reporting with detailed failure messages.
 
 = 1.0.0 =
 * Initial release.
