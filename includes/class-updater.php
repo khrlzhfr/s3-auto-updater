@@ -52,6 +52,18 @@ class S3_Auto_Updater_Updater {
 
         // Clear our cache when WordPress force-checks for updates.
         add_action( 'load-update-core.php', array( $this, 'maybe_flush_cache' ) );
+
+        // Add "Update all now" action link on the S3 Auto Updater row.
+        add_filter(
+            'plugin_action_links_s3-auto-updater/s3-auto-updater.php',
+            array( $this, 'add_update_all_link' )
+        );
+
+        // Handle the bulk update request.
+        add_action( 'admin_post_s3_update_all', array( $this, 'handle_update_all' ) );
+
+        // Show results after a bulk update.
+        add_action( 'admin_notices', array( $this, 'show_update_results' ) );
     }
 
     /* ------------------------------------------------------------------
@@ -272,8 +284,261 @@ class S3_Auto_Updater_Updater {
     }
 
     /* ------------------------------------------------------------------
+     * Plugin action links and bulk update
+     * ----------------------------------------------------------------*/
+
+    /**
+     * Filter: plugin_action_links_s3-auto-updater/s3-auto-updater.php
+     *
+     * Adds an "Update all now" link before "Deactivate" on the
+     * S3 Auto Updater's own row in the Plugins page.
+     *
+     * @param  string[] $actions Array of action links.
+     * @return string[]
+     */
+    public function add_update_all_link( $actions ) {
+        $update_url = wp_nonce_url(
+            admin_url( 'admin-post.php?action=s3_update_all' ),
+            's3_update_all'
+        );
+
+        $link = sprintf(
+            '<a href="%s" style="font-weight:700;">Update all now</a>',
+            esc_url( $update_url )
+        );
+
+        // Insert before 'deactivate' if it exists, otherwise prepend.
+        $new_actions = array();
+        $inserted    = false;
+
+        foreach ( $actions as $key => $value ) {
+            if ( 'deactivate' === $key && ! $inserted ) {
+                $new_actions['s3_update_all'] = $link;
+                $inserted = true;
+            }
+            $new_actions[ $key ] = $value;
+        }
+
+        if ( ! $inserted ) {
+            $new_actions = array( 's3_update_all' => $link ) + $new_actions;
+        }
+
+        return $new_actions;
+    }
+
+    /**
+     * Action: admin_post_s3_update_all
+     *
+     * Handles the "Update all now" request. Clears the S3 cache,
+     * forces a fresh update check, then bulk-updates all S3-managed
+     * plugins and themes that have newer versions available.
+     */
+    public function handle_update_all() {
+        if ( ! current_user_can( 'update_plugins' ) || ! current_user_can( 'update_themes' ) ) {
+            wp_die( 'You do not have permission to perform this action.' );
+        }
+
+        check_admin_referer( 's3_update_all' );
+
+        // Clear cached S3 data so we get a fresh listing.
+        delete_transient( $this->cache_prefix . 'plugins' );
+        delete_transient( $this->cache_prefix . 'themes' );
+
+        // Force WordPress to re-check updates with our fresh S3 data.
+        delete_site_transient( 'update_plugins' );
+        delete_site_transient( 'update_themes' );
+        wp_update_plugins();
+        wp_update_themes();
+
+        require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+
+        // --- Update plugins ---
+        $s3_plugins = $this->get_s3_items( 'plugins' );
+        $installed  = get_plugins();
+        $plugins_to_update = array();
+
+        foreach ( $installed as $plugin_file => $plugin_data ) {
+            $slug = dirname( $plugin_file );
+            if ( '.' === $slug || ! isset( $s3_plugins[ $slug ] ) ) {
+                continue;
+            }
+            if ( version_compare( $s3_plugins[ $slug ]['version'], $plugin_data['Version'], '>' ) ) {
+                $plugins_to_update[] = $plugin_file;
+            }
+        }
+
+        // --- Update themes ---
+        $s3_themes = $this->get_s3_items( 'themes' );
+        $installed_themes = wp_get_themes();
+        $themes_to_update = array();
+
+        foreach ( $installed_themes as $slug => $theme ) {
+            if ( ! isset( $s3_themes[ $slug ] ) ) {
+                continue;
+            }
+            if ( version_compare( $s3_themes[ $slug ]['version'], $theme->get( 'Version' ), '>' ) ) {
+                $themes_to_update[] = $slug;
+            }
+        }
+
+        $results = array(
+            'plugins_updated' => 0,
+            'themes_updated'  => 0,
+            'failures'        => array(),
+        );
+
+        if ( ! empty( $plugins_to_update ) ) {
+            $skin     = new Automatic_Upgrader_Skin();
+            $upgrader = new Plugin_Upgrader( $skin );
+            $result   = $upgrader->bulk_upgrade( $plugins_to_update );
+
+            if ( is_array( $result ) ) {
+                foreach ( $result as $plugin_file => $outcome ) {
+                    if ( ! empty( $outcome ) && ! is_wp_error( $outcome ) ) {
+                        $results['plugins_updated']++;
+                    } else {
+                        $slug  = dirname( $plugin_file );
+                        $error = is_wp_error( $outcome )
+                            ? $outcome->get_error_message()
+                            : $this->extract_skin_errors( $skin, $slug );
+                        $results['failures'][] = sprintf( 'Plugin "%s": %s', $slug, $error );
+                    }
+                }
+            }
+        }
+
+        if ( ! empty( $themes_to_update ) ) {
+            $skin     = new Automatic_Upgrader_Skin();
+            $upgrader = new Theme_Upgrader( $skin );
+            $result   = $upgrader->bulk_upgrade( $themes_to_update );
+
+            if ( is_array( $result ) ) {
+                foreach ( $result as $theme_slug => $outcome ) {
+                    if ( ! empty( $outcome ) && ! is_wp_error( $outcome ) ) {
+                        $results['themes_updated']++;
+                    } else {
+                        $error = is_wp_error( $outcome )
+                            ? $outcome->get_error_message()
+                            : $this->extract_skin_errors( $skin, $theme_slug );
+                        $results['failures'][] = sprintf( 'Theme "%s": %s', $theme_slug, $error );
+                    }
+                }
+            }
+        }
+
+        // Log failures for debugging.
+        if ( ! empty( $results['failures'] ) ) {
+            foreach ( $results['failures'] as $failure ) {
+                error_log( 'S3 Auto Updater: ' . $failure );
+            }
+        }
+
+        // Store results for display and redirect back.
+        set_transient( $this->cache_prefix . 'update_results', $results, 60 );
+
+        wp_safe_redirect( admin_url( 'plugins.php?s3_updated=1' ) );
+        exit;
+    }
+
+    /**
+     * Action: admin_notices
+     *
+     * Displays the outcome of a bulk update after redirect.
+     */
+    public function show_update_results() {
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+        if ( ! isset( $_GET['s3_updated'] ) ) {
+            return;
+        }
+
+        $results = get_transient( $this->cache_prefix . 'update_results' );
+        delete_transient( $this->cache_prefix . 'update_results' );
+
+        if ( ! $results ) {
+            return;
+        }
+
+        $total_updated = $results['plugins_updated'] + $results['themes_updated'];
+        $failures      = $results['failures'];
+
+        if ( $total_updated === 0 && empty( $failures ) ) {
+            echo '<div class="notice notice-info is-dismissible"><p><strong>S3 Auto Updater:</strong> Everything is already up to date.</p></div>';
+            return;
+        }
+
+        $messages = array();
+        if ( $results['plugins_updated'] > 0 ) {
+            $messages[] = sprintf( '%d plugin(s) updated', $results['plugins_updated'] );
+        }
+        if ( $results['themes_updated'] > 0 ) {
+            $messages[] = sprintf( '%d theme(s) updated', $results['themes_updated'] );
+        }
+
+        $output = '<div class="notice notice-' . ( empty( $failures ) ? 'success' : 'warning' ) . ' is-dismissible">';
+        $output .= '<p><strong>S3 Auto Updater:</strong> ';
+
+        if ( ! empty( $messages ) ) {
+            $output .= esc_html( implode( ', ', $messages ) ) . '.';
+        }
+
+        if ( ! empty( $failures ) ) {
+            $output .= '</p><p><strong>Failed:</strong></p><ul style="list-style:disc;margin-left:20px;">';
+            foreach ( $failures as $failure ) {
+                $output .= '<li>' . esc_html( $failure ) . '</li>';
+            }
+            $output .= '</ul>';
+        } else {
+            $output .= '</p>';
+        }
+
+        $output .= '</div>';
+        echo $output;
+    }
+
+    /* ------------------------------------------------------------------
      * Internal helpers
      * ----------------------------------------------------------------*/
+
+    /**
+     * Extract error messages from the upgrader skin's feedback.
+     *
+     * When bulk_upgrade returns false for an item, the actual error
+     * detail is often only available in the skin's message log.
+     *
+     * @param  Automatic_Upgrader_Skin $skin
+     * @param  string                  $slug  The slug to filter messages for.
+     * @return string                         Error description.
+     */
+    private function extract_skin_errors( $skin, $slug ) {
+        $messages = $skin->get_upgrade_messages();
+
+        if ( empty( $messages ) ) {
+            return 'Unknown error (no details available from the upgrader).';
+        }
+
+        // Filter for messages that look like errors or mention this slug.
+        $relevant = array();
+        foreach ( $messages as $msg ) {
+            $msg_lower = strtolower( $msg );
+            if (
+                strpos( $msg_lower, 'error' ) !== false ||
+                strpos( $msg_lower, 'failed' ) !== false ||
+                strpos( $msg_lower, 'unable' ) !== false ||
+                strpos( $msg_lower, 'could not' ) !== false ||
+                strpos( $msg_lower, $slug ) !== false
+            ) {
+                $relevant[] = wp_strip_all_tags( $msg );
+            }
+        }
+
+        if ( ! empty( $relevant ) ) {
+            return implode( ' | ', $relevant );
+        }
+
+        // Fallback: return all skin messages so the user has something to work with.
+        return implode( ' | ', array_map( 'wp_strip_all_tags', $messages ) );
+    }
 
     /**
      * Fetch and cache the list of available items from S3.
