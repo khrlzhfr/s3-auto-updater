@@ -1,0 +1,259 @@
+<?php
+/**
+ * Lightweight S3 client using AWS Signature V4.
+ *
+ * Only implements ListObjectsV2 and GetObject – the two operations
+ * needed by the updater. Uses wp_remote_get() so there are no
+ * external dependencies.
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+class S3_Auto_Updater_Client {
+
+    /** @var string */
+    private $bucket;
+
+    /** @var string */
+    private $region;
+
+    /** @var string */
+    private $access_key;
+
+    /** @var string */
+    private $secret_key;
+
+    /** @var string */
+    private $host;
+
+    /**
+     * @param string $bucket     S3 bucket name.
+     * @param string $region     AWS region, e.g. 'ap-southeast-1'.
+     * @param string $access_key IAM access key ID.
+     * @param string $secret_key IAM secret access key.
+     */
+    public function __construct( $bucket, $region, $access_key, $secret_key ) {
+        $this->bucket     = $bucket;
+        $this->region     = $region;
+        $this->access_key = $access_key;
+        $this->secret_key = $secret_key;
+        $this->host       = "{$bucket}.s3.{$region}.amazonaws.com";
+    }
+
+    /**
+     * List objects under a given prefix.
+     *
+     * @param  string          $prefix  e.g. 'plugins/' or 'themes/'.
+     * @return string[]|WP_Error        Array of object keys.
+     */
+    public function list_objects( $prefix = '' ) {
+        $query_params = array(
+            'list-type' => '2',
+            'prefix'    => $prefix,
+        );
+
+        $response = $this->request( '/', $query_params );
+
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        if ( $code !== 200 ) {
+            return new WP_Error(
+                's3_list_error',
+                sprintf( 'S3 ListObjectsV2 returned HTTP %d.', $code )
+            );
+        }
+
+        $body = wp_remote_retrieve_body( $response );
+        $xml  = @simplexml_load_string( $body );
+
+        if ( ! $xml ) {
+            return new WP_Error( 's3_parse_error', 'Failed to parse S3 XML response.' );
+        }
+
+        $keys = array();
+        if ( isset( $xml->Contents ) ) {
+            foreach ( $xml->Contents as $item ) {
+                $keys[] = (string) $item->Key;
+            }
+        }
+
+        return $keys;
+    }
+
+    /**
+     * Download an object to a local temp file.
+     *
+     * @param  string            $key  S3 object key, e.g. 'plugins/my-plugin---1.0.0.zip'.
+     * @return string|WP_Error         Path to the temp file.
+     */
+    public function download( $key ) {
+        $path    = '/' . ltrim( $key, '/' );
+        $tmpfile = wp_tempnam( basename( $key ) );
+
+        $response = $this->request( $path, array(), array(
+            'timeout'  => 300,
+            'stream'   => true,
+            'filename' => $tmpfile,
+        ) );
+
+        if ( is_wp_error( $response ) ) {
+            @unlink( $tmpfile );
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        if ( $code !== 200 ) {
+            @unlink( $tmpfile );
+            return new WP_Error(
+                's3_download_error',
+                sprintf( 'S3 GetObject returned HTTP %d for key "%s".', $code, $key )
+            );
+        }
+
+        return $tmpfile;
+    }
+
+    /* ------------------------------------------------------------------
+     * Internal helpers
+     * ----------------------------------------------------------------*/
+
+    /**
+     * Make a signed GET request to S3.
+     *
+     * @param  string $path         URI path, e.g. '/' or '/plugins/file.zip'.
+     * @param  array  $query_params Query string parameters.
+     * @param  array  $extra_args   Additional args passed to wp_remote_get().
+     * @return array|WP_Error       WP HTTP response.
+     */
+    private function request( $path, $query_params = array(), $extra_args = array() ) {
+        $timestamp = time();
+        $date      = gmdate( 'Ymd\THis\Z', $timestamp );
+        $datestamp  = gmdate( 'Ymd', $timestamp );
+
+        // URI-encode each path segment (preserves '/').
+        $encoded_path = $this->encode_uri( $path );
+
+        // Sort query params alphabetically by key (required by SigV4).
+        ksort( $query_params );
+        $canonical_query = $this->build_query_string( $query_params );
+
+        // Payload hash (always empty body for GET).
+        $payload_hash = hash( 'sha256', '' );
+
+        // Canonical headers – must be sorted by lowercase header name.
+        $canonical_headers = implode( "\n", array(
+            'host:' . $this->host,
+            'x-amz-content-sha256:' . $payload_hash,
+            'x-amz-date:' . $date,
+        ) ) . "\n";
+
+        $signed_headers = 'host;x-amz-content-sha256;x-amz-date';
+
+        // Canonical request.
+        $canonical_request = implode( "\n", array(
+            'GET',
+            $encoded_path,
+            $canonical_query,
+            $canonical_headers,
+            $signed_headers,
+            $payload_hash,
+        ) );
+
+        // String to sign.
+        $scope          = "{$datestamp}/{$this->region}/s3/aws4_request";
+        $string_to_sign = implode( "\n", array(
+            'AWS4-HMAC-SHA256',
+            $date,
+            $scope,
+            hash( 'sha256', $canonical_request ),
+        ) );
+
+        // Signing key.
+        $signing_key = $this->derive_signing_key( $datestamp );
+
+        // Signature.
+        $signature = hash_hmac( 'sha256', $string_to_sign, $signing_key );
+
+        // Authorisation header.
+        $authorization = sprintf(
+            'AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s',
+            $this->access_key,
+            $scope,
+            $signed_headers,
+            $signature
+        );
+
+        // Build URL.
+        $url = 'https://' . $this->host . $path;
+        if ( $canonical_query !== '' ) {
+            $url .= '?' . $canonical_query;
+        }
+
+        $args = array_merge(
+            array(
+                'headers' => array(
+                    'Host'                 => $this->host,
+                    'x-amz-date'           => $date,
+                    'x-amz-content-sha256' => $payload_hash,
+                    'Authorization'        => $authorization,
+                ),
+                'timeout' => 30,
+            ),
+            $extra_args
+        );
+
+        return wp_remote_get( $url, $args );
+    }
+
+    /**
+     * Derive the SigV4 signing key.
+     *
+     * @param  string $datestamp YYYYMMDD.
+     * @return string           Binary signing key.
+     */
+    private function derive_signing_key( $datestamp ) {
+        $k_date    = hash_hmac( 'sha256', $datestamp, 'AWS4' . $this->secret_key, true );
+        $k_region  = hash_hmac( 'sha256', $this->region, $k_date, true );
+        $k_service = hash_hmac( 'sha256', 's3', $k_region, true );
+
+        return hash_hmac( 'sha256', 'aws4_request', $k_service, true );
+    }
+
+    /**
+     * URI-encode a path, encoding each segment individually
+     * while preserving '/' separators.
+     *
+     * @param  string $path
+     * @return string
+     */
+    private function encode_uri( $path ) {
+        $segments = explode( '/', $path );
+        $encoded  = array_map( 'rawurlencode', $segments );
+
+        return implode( '/', $encoded );
+    }
+
+    /**
+     * Build a canonical query string (RFC 3986 encoding, sorted).
+     *
+     * @param  array  $params
+     * @return string
+     */
+    private function build_query_string( $params ) {
+        if ( empty( $params ) ) {
+            return '';
+        }
+
+        $parts = array();
+        foreach ( $params as $key => $value ) {
+            $parts[] = rawurlencode( $key ) . '=' . rawurlencode( $value );
+        }
+
+        return implode( '&', $parts );
+    }
+}
