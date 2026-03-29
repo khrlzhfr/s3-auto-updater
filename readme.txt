@@ -53,9 +53,9 @@ convention below and your WordPress sites will pick up the update.
    define('S3_UPDATER_KEY',    'AKIA...');
    define('S3_UPDATER_SECRET', 'your-secret-key');
 
-   Option B – Settings > General in the WordPress admin:
+   Option B – Tools > S3 Updater in the WordPress admin:
 
-   Scroll down to the "S3 Auto Updater" section and fill in the fields.
+   Go to the S3 Updater page and fill in the credentials fields.
 
    Constants in wp-config.php always take priority. When a constant is
    defined, the corresponding field in Settings is shown as disabled.

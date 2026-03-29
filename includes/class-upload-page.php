@@ -1,9 +1,11 @@
 <?php
 /**
- * Admin page for uploading plugin/theme zips to the S3 bucket
- * and managing existing packages.
+ * Admin page under Tools > S3 Updater.
  *
- * Accessible under Tools > S3 Updater.
+ * Handles:
+ * - S3 credential configuration
+ * - Uploading plugin/theme zips to S3
+ * - Listing and deleting existing packages
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -12,17 +14,22 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class S3_Auto_Updater_Upload_Page {
 
-    /** @var S3_Auto_Updater_Client */
+    /** @var S3_Auto_Updater_Settings */
+    private $settings;
+
+    /** @var S3_Auto_Updater_Client|null */
     private $client;
 
     /** @var string Filename delimiter. */
     private $delimiter = '---';
 
     /**
-     * @param S3_Auto_Updater_Client $client
+     * @param S3_Auto_Updater_Settings    $settings
+     * @param S3_Auto_Updater_Client|null $client  Null if credentials are not yet configured.
      */
-    public function __construct( S3_Auto_Updater_Client $client ) {
-        $this->client = $client;
+    public function __construct( S3_Auto_Updater_Settings $settings, $client = null ) {
+        $this->settings = $settings;
+        $this->client   = $client;
     }
 
     /**
@@ -30,6 +37,7 @@ class S3_Auto_Updater_Upload_Page {
      */
     public function init() {
         add_action( 'admin_menu', array( $this, 'add_menu_page' ) );
+        add_action( 'admin_post_s3_updater_save_settings', array( $this, 'handle_save_settings' ) );
         add_action( 'admin_post_s3_updater_upload', array( $this, 'handle_upload' ) );
         add_action( 'admin_post_s3_updater_delete', array( $this, 'handle_delete' ) );
     }
@@ -51,60 +59,164 @@ class S3_Auto_Updater_Upload_Page {
      * Render the admin page.
      */
     public function render_page() {
-        $plugins = $this->get_bucket_items( 'plugins' );
-        $themes  = $this->get_bucket_items( 'themes' );
-
         ?>
         <div class="wrap">
             <h1>S3 Auto Updater</h1>
 
             <?php $this->show_admin_notices(); ?>
 
-            <h2>Upload package</h2>
-            <p>
-                Upload a plugin or theme zip file to your S3 bucket.<br>
-                The filename must follow the convention: <code>{slug}---{version}.zip</code><br>
-                Example: <code>jetengine---3.8.6.2.zip</code>
-            </p>
+            <?php if ( $this->client ) : ?>
 
-            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" enctype="multipart/form-data">
-                <?php wp_nonce_field( 's3_updater_upload' ); ?>
-                <input type="hidden" name="action" value="s3_updater_upload" />
+                <h2>Packages in bucket</h2>
 
-                <table class="form-table">
-                    <tr>
-                        <th scope="row"><label for="s3u_type">Type</label></th>
-                        <td>
-                            <select name="s3u_type" id="s3u_type">
-                                <option value="plugins">Plugin</option>
-                                <option value="themes">Theme</option>
-                            </select>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="s3u_file">Zip file</label></th>
-                        <td>
-                            <input type="file" name="s3u_file" id="s3u_file" accept=".zip" required />
-                            <p class="description">
-                                The filename must use <code>---</code> (triple hyphen) to separate the slug from the version.
-                            </p>
-                        </td>
-                    </tr>
-                </table>
+                <?php
+                $plugins = $this->get_bucket_items( 'plugins' );
+                $themes  = $this->get_bucket_items( 'themes' );
+                ?>
 
-                <?php submit_button( 'Upload to S3' ); ?>
-            </form>
+                <h3>Plugins</h3>
+                <?php $this->render_items_table( $plugins, 'plugins' ); ?>
 
-            <hr />
+                <h3>Themes</h3>
+                <?php $this->render_items_table( $themes, 'themes' ); ?>
 
-            <h2>Packages in bucket</h2>
+                <hr />
 
-            <h3>Plugins</h3>
-            <?php $this->render_items_table( $plugins, 'plugins' ); ?>
+                <?php $this->render_upload_form(); ?>
 
-            <h3>Themes</h3>
-            <?php $this->render_items_table( $themes, 'themes' ); ?>
+                <hr />
+
+            <?php else : ?>
+                <p>Enter your S3 credentials below and save to enable uploads and update checks.</p>
+                <hr />
+            <?php endif; ?>
+
+            <?php $this->render_credentials_form(); ?>
         </div>
+        <?php
+    }
+
+    /* ------------------------------------------------------------------
+     * Credentials
+     * ----------------------------------------------------------------*/
+
+    /**
+     * Render the credentials form.
+     */
+    private function render_credentials_form() {
+        $fields = $this->settings->get_fields();
+        ?>
+        <h2>S3 Credentials</h2>
+        <p>Fields defined in <code>wp-config.php</code> take priority and cannot be edited here.</p>
+
+        <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+            <?php wp_nonce_field( 's3_updater_save_settings' ); ?>
+            <input type="hidden" name="action" value="s3_updater_save_settings" />
+
+            <table class="form-table">
+                <?php foreach ( $fields as $key => $field ) :
+                    $is_const = $this->settings->is_constant( $key );
+                    $value    = $this->settings->get( $key );
+                ?>
+                <tr>
+                    <th scope="row"><label for="s3u_<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $field['label'] ); ?></label></th>
+                    <td>
+                        <?php if ( $is_const ) : ?>
+                            <input type="text"
+                                   value="<?php echo esc_attr( $this->settings->mask_value( $value, $key ) ); ?>"
+                                   class="regular-text"
+                                   disabled="disabled" />
+                            <span class="description">Defined in <code>wp-config.php</code></span>
+                        <?php else : ?>
+                            <input type="<?php echo esc_attr( $field['type'] ); ?>"
+                                   name="s3u_<?php echo esc_attr( $key ); ?>"
+                                   id="s3u_<?php echo esc_attr( $key ); ?>"
+                                   value="<?php echo esc_attr( $value ); ?>"
+                                   class="regular-text"
+                                   autocomplete="off" />
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+
+            <?php submit_button( 'Save credentials' ); ?>
+        </form>
+        <?php
+    }
+
+    /**
+     * Handle saving credentials.
+     */
+    public function handle_save_settings() {
+        if ( ! current_user_can( 'update_plugins' ) ) {
+            wp_die( 'You do not have permission to perform this action.' );
+        }
+
+        check_admin_referer( 's3_updater_save_settings' );
+
+        $data = array();
+        foreach ( array( 'bucket', 'region', 'key', 'secret' ) as $key ) {
+            if ( isset( $_POST[ 's3u_' . $key ] ) ) {
+                $data[ $key ] = $_POST[ 's3u_' . $key ];
+            }
+        }
+
+        $this->settings->save( $data );
+
+        wp_safe_redirect( admin_url( 'tools.php?page=s3-auto-updater&s3u_success=settings_saved' ) );
+        exit;
+    }
+
+    /* ------------------------------------------------------------------
+     * Upload
+     * ----------------------------------------------------------------*/
+
+    /**
+     * Render the upload form.
+     */
+    private function render_upload_form() {
+        ?>
+        <h2>Upload package</h2>
+        <p>Upload a plugin or theme zip file to your S3 bucket.</p>
+
+        <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" enctype="multipart/form-data">
+            <?php wp_nonce_field( 's3_updater_upload' ); ?>
+            <input type="hidden" name="action" value="s3_updater_upload" />
+
+            <table class="form-table">
+                <tr>
+                    <th scope="row"><label for="s3u_type">Type</label></th>
+                    <td>
+                        <select name="s3u_type" id="s3u_type">
+                            <option value="plugins">Plugin</option>
+                            <option value="themes">Theme</option>
+                        </select>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="s3u_slug">Slug</label></th>
+                    <td>
+                        <input type="text" name="s3u_slug" id="s3u_slug" class="regular-text" required placeholder="e.g. jetengine" />
+                        <p class="description">Must match the plugin or theme folder name exactly.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="s3u_version">Version</label></th>
+                    <td>
+                        <input type="text" name="s3u_version" id="s3u_version" class="regular-text" required placeholder="e.g. 3.8.6.2" />
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="s3u_file">Zip file</label></th>
+                    <td>
+                        <input type="file" name="s3u_file" id="s3u_file" accept=".zip" required />
+                    </td>
+                </tr>
+            </table>
+
+            <?php submit_button( 'Upload to S3' ); ?>
+        </form>
         <?php
     }
 
@@ -120,6 +232,11 @@ class S3_Auto_Updater_Upload_Page {
 
         $redirect_url = admin_url( 'tools.php?page=s3-auto-updater' );
 
+        if ( ! $this->client ) {
+            wp_safe_redirect( add_query_arg( 's3u_error', 'not_configured', $redirect_url ) );
+            exit;
+        }
+
         // Validate file upload.
         if ( empty( $_FILES['s3u_file'] ) || $_FILES['s3u_file']['error'] !== UPLOAD_ERR_OK ) {
             $error_code = isset( $_FILES['s3u_file']['error'] ) ? $_FILES['s3u_file']['error'] : 'unknown';
@@ -127,30 +244,32 @@ class S3_Auto_Updater_Upload_Page {
             exit;
         }
 
-        $type     = isset( $_POST['s3u_type'] ) && $_POST['s3u_type'] === 'themes' ? 'themes' : 'plugins';
-        $tmppath  = $_FILES['s3u_file']['tmp_name'];
+        $type    = isset( $_POST['s3u_type'] ) && $_POST['s3u_type'] === 'themes' ? 'themes' : 'plugins';
+        $slug    = isset( $_POST['s3u_slug'] ) ? sanitize_title( $_POST['s3u_slug'] ) : '';
+        $version = isset( $_POST['s3u_version'] ) ? preg_replace( '/[^0-9.]/', '', $_POST['s3u_version'] ) : '';
+        $tmppath = $_FILES['s3u_file']['tmp_name'];
 
-        // Sanitise filename manually to preserve the '---' delimiter.
-        // WordPress's sanitize_file_name() collapses consecutive hyphens.
-        $filename = basename( $_FILES['s3u_file']['name'] );
-        $filename = preg_replace( '/[^a-zA-Z0-9._\-]/', '', $filename );
+        if ( empty( $slug ) ) {
+            wp_safe_redirect( add_query_arg( 's3u_error', 'missing_slug', $redirect_url ) );
+            exit;
+        }
+
+        if ( empty( $version ) ) {
+            wp_safe_redirect( add_query_arg( 's3u_error', 'missing_version', $redirect_url ) );
+            exit;
+        }
 
         // Validate .zip extension.
-        if ( strtolower( substr( $filename, -4 ) ) !== '.zip' ) {
+        $original_name = basename( $_FILES['s3u_file']['name'] );
+        if ( strtolower( substr( $original_name, -4 ) ) !== '.zip' ) {
             wp_safe_redirect( add_query_arg( 's3u_error', 'not_zip', $redirect_url ) );
             exit;
         }
 
-        // Validate naming convention.
-        $parsed = $this->parse_filename( $filename );
-        if ( ! $parsed ) {
-            wp_safe_redirect( add_query_arg( 's3u_error', 'bad_filename', $redirect_url ) );
-            exit;
-        }
-
-        // Upload to S3.
-        $key    = $type . '/' . $filename;
-        $result = $this->client->upload( $key, $tmppath );
+        // Build the S3 key: e.g. plugins/jetengine---3.8.6.2.zip
+        $filename = $slug . $this->delimiter . $version . '.zip';
+        $key      = $type . '/' . $filename;
+        $result   = $this->client->upload( $key, $tmppath );
 
         if ( is_wp_error( $result ) ) {
             error_log( 'S3 Auto Updater upload error: ' . $result->get_error_message() );
@@ -164,11 +283,15 @@ class S3_Auto_Updater_Upload_Page {
 
         wp_safe_redirect( add_query_arg( array(
             's3u_success' => 'uploaded',
-            's3u_slug'    => $parsed['slug'],
-            's3u_version' => $parsed['version'],
+            's3u_slug'    => $slug,
+            's3u_version' => $version,
         ), $redirect_url ) );
         exit;
     }
+
+    /* ------------------------------------------------------------------
+     * Delete
+     * ----------------------------------------------------------------*/
 
     /**
      * Handle package deletion.
@@ -185,12 +308,16 @@ class S3_Auto_Updater_Upload_Page {
 
         $redirect_url = admin_url( 'tools.php?page=s3-auto-updater' );
 
+        if ( ! $this->client ) {
+            wp_safe_redirect( add_query_arg( 's3u_error', 'not_configured', $redirect_url ) );
+            exit;
+        }
+
         if ( empty( $key ) ) {
             wp_safe_redirect( add_query_arg( 's3u_error', 'no_key', $redirect_url ) );
             exit;
         }
 
-        // Validate the key starts with plugins/ or themes/.
         if ( 0 !== strpos( $key, 'plugins/' ) && 0 !== strpos( $key, 'themes/' ) ) {
             wp_safe_redirect( add_query_arg( 's3u_error', 'invalid_key', $redirect_url ) );
             exit;
@@ -228,6 +355,8 @@ class S3_Auto_Updater_Upload_Page {
                 $msg     = sprintf( 'Uploaded <strong>%s</strong> version <strong>%s</strong> to S3.', esc_html( $slug ), esc_html( $version ) );
             } elseif ( 'deleted' === $_GET['s3u_success'] ) {
                 $msg = 'Package deleted from S3.';
+            } elseif ( 'settings_saved' === $_GET['s3u_success'] ) {
+                $msg = 'Credentials saved. Reload the page to connect to S3.';
             }
             if ( $msg ) {
                 echo '<div class="notice notice-success is-dismissible"><p>' . $msg . '</p></div>';
@@ -236,14 +365,16 @@ class S3_Auto_Updater_Upload_Page {
 
         if ( isset( $_GET['s3u_error'] ) ) {
             $errors = array(
-                'not_zip'      => 'The file must be a .zip archive.',
-                'bad_filename' => 'The filename must follow the convention <code>{slug}---{version}.zip</code>.',
-                's3_error'     => 'Failed to communicate with S3. Check the PHP error log for details.',
-                'no_key'       => 'No package key specified.',
-                'invalid_key'  => 'Invalid package key.',
+                'not_zip'         => 'The file must be a .zip archive.',
+                'missing_slug'    => 'Please enter a slug.',
+                'missing_version' => 'Please enter a version number.',
+                'not_configured'  => 'S3 credentials are not configured.',
+                's3_error'        => 'Failed to communicate with S3. Check the PHP error log for details.',
+                'no_key'          => 'No package key specified.',
+                'invalid_key'     => 'Invalid package key.',
             );
             $code = sanitize_text_field( $_GET['s3u_error'] );
-            $msg  = isset( $errors[ $code ] ) ? $errors[ $code ] : 'Upload failed (error: ' . esc_html( $code ) . ').';
+            $msg  = isset( $errors[ $code ] ) ? $errors[ $code ] : 'Operation failed (error: ' . esc_html( $code ) . ').';
             echo '<div class="notice notice-error is-dismissible"><p>' . $msg . '</p></div>';
         }
         // phpcs:enable
@@ -296,6 +427,10 @@ class S3_Auto_Updater_Upload_Page {
      * @return array        Array of [ 'key', 'slug', 'version' ].
      */
     private function get_bucket_items( $type ) {
+        if ( ! $this->client ) {
+            return array();
+        }
+
         $prefix  = $type . '/';
         $objects = $this->client->list_objects( $prefix );
 
@@ -320,7 +455,6 @@ class S3_Auto_Updater_Upload_Page {
             );
         }
 
-        // Sort by slug, then by version descending.
         usort( $items, function ( $a, $b ) {
             $slug_cmp = strcmp( $a['slug'], $b['slug'] );
             if ( 0 !== $slug_cmp ) {

@@ -1,10 +1,8 @@
 <?php
 /**
- * Adds S3 Auto Updater settings to Settings > General.
+ * Handles S3 credential storage and retrieval.
  *
- * Credentials defined in wp-config.php take priority over database
- * values. When a constant is defined, the corresponding input field
- * is shown as disabled with the value masked.
+ * Credentials defined in wp-config.php take priority over database values.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -41,96 +39,6 @@ class S3_Auto_Updater_Settings {
     );
 
     /**
-     * Register hooks.
-     */
-    public function init() {
-        add_action( 'admin_init', array( $this, 'register_settings' ) );
-    }
-
-    /**
-     * Register a settings section and fields under Settings > General.
-     */
-    public function register_settings() {
-        add_settings_section(
-            's3_auto_updater_section',
-            'S3 Auto Updater',
-            array( $this, 'render_section' ),
-            'general'
-        );
-
-        foreach ( $this->fields as $key => $field ) {
-            $option_name = $this->prefix . $key;
-
-            register_setting( 'general', $option_name, array(
-                'type'              => 'string',
-                'sanitize_callback' => array( $this, 'sanitize_field' ),
-                'default'           => '',
-            ) );
-
-            add_settings_field(
-                $option_name,
-                $field['label'],
-                array( $this, 'render_field' ),
-                'general',
-                's3_auto_updater_section',
-                array(
-                    'key'  => $key,
-                    'field' => $field,
-                )
-            );
-        }
-    }
-
-    /**
-     * Section description.
-     */
-    public function render_section() {
-        echo '<p id="s3-auto-updater-section">Enter your Amazon S3 credentials. Fields defined in <code>wp-config.php</code> take priority and cannot be edited here.</p>';
-    }
-
-    /**
-     * Render a single settings field.
-     *
-     * @param array $args
-     */
-    public function render_field( $args ) {
-        $key         = $args['key'];
-        $field       = $args['field'];
-        $option_name = $this->prefix . $key;
-        $constant    = $field['constant'];
-        $is_const    = defined( $constant );
-
-        if ( $is_const ) {
-            $display_value = $this->mask_value( constant( $constant ), $key );
-            printf(
-                '<input type="text" name="%s" value="%s" class="regular-text" disabled="disabled" /> '
-                . '<span class="description">Defined in <code>wp-config.php</code></span>',
-                esc_attr( $option_name ),
-                esc_attr( $display_value )
-            );
-        } else {
-            $db_value = get_option( $option_name, '' );
-            $type     = $field['type'];
-            printf(
-                '<input type="%s" name="%s" value="%s" class="regular-text" autocomplete="off" />',
-                esc_attr( $type ),
-                esc_attr( $option_name ),
-                esc_attr( $db_value )
-            );
-        }
-    }
-
-    /**
-     * Sanitise a field value before saving.
-     *
-     * @param  string $value
-     * @return string
-     */
-    public function sanitize_field( $value ) {
-        return sanitize_text_field( trim( $value ) );
-    }
-
-    /**
      * Get a setting value, preferring wp-config constants over database.
      *
      * @param  string      $key One of: bucket, region, key, secret.
@@ -153,6 +61,26 @@ class S3_Auto_Updater_Settings {
     }
 
     /**
+     * Save credentials to the database.
+     * Skips fields that are defined in wp-config.php.
+     *
+     * @param array $data Associative array: [ 'bucket' => '...', 'region' => '...', ... ]
+     */
+    public function save( $data ) {
+        foreach ( $this->fields as $key => $field ) {
+            // Never overwrite wp-config constants.
+            if ( defined( $field['constant'] ) ) {
+                continue;
+            }
+
+            if ( isset( $data[ $key ] ) ) {
+                $value = sanitize_text_field( trim( $data[ $key ] ) );
+                update_option( $this->prefix . $key, $value );
+            }
+        }
+    }
+
+    /**
      * Check whether all required settings are configured
      * (from either source).
      *
@@ -168,6 +96,28 @@ class S3_Auto_Updater_Settings {
     }
 
     /**
+     * Check whether a specific field is defined in wp-config.php.
+     *
+     * @param  string $key
+     * @return bool
+     */
+    public function is_constant( $key ) {
+        if ( ! isset( $this->fields[ $key ] ) ) {
+            return false;
+        }
+        return defined( $this->fields[ $key ]['constant'] );
+    }
+
+    /**
+     * Get field definitions for rendering.
+     *
+     * @return array
+     */
+    public function get_fields() {
+        return $this->fields;
+    }
+
+    /**
      * Mask a value for display in disabled fields.
      * Shows the full value for bucket and region, masks key and secret.
      *
@@ -175,7 +125,7 @@ class S3_Auto_Updater_Settings {
      * @param  string $key
      * @return string
      */
-    private function mask_value( $value, $key ) {
+    public function mask_value( $value, $key ) {
         if ( in_array( $key, array( 'bucket', 'region' ), true ) ) {
             return $value;
         }
